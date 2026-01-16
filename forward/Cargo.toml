@@ -1,0 +1,8 @@
+[package]
+name = "forward"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+conlock = { path = "../conlock" }
+forward_macro = { path = "../forward_macro" }

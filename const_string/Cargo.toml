@@ -1,0 +1,13 @@
+[package]
+name = "const_string"
+version = "0.1.0"
+edition = "2024"
+
+[[bench]]
+name = "bench_const_string"
+harness = false
+
+[dependencies]
+
+[dev-dependencies]
+criterion = "0.5"
