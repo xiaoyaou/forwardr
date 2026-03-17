@@ -87,7 +87,7 @@ impl FromStr for ConstString {
 
 impl From<ConstString> for String {
     fn from(value: ConstString) -> Self {
-        value.into_string()
+        String::from(value.as_str())
     }
 }
 
@@ -131,7 +131,7 @@ impl Clone for ConstString {
             ConstString {
                 inner: HeapStackStr {
                     // SAFETY: 堆上字符串可直接复刻创建
-                    heap: unsafe { HeapStr::new(self.inner.heap.ptr, self.inner.heap.len) },
+                    heap: HeapStr::new(unsafe { self.inner.heap.as_str() }),
                 },
             }
         }

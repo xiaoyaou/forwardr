@@ -37,7 +37,7 @@ fn bench_methods_for(c: &mut Criterion, id: &str, sample: &str) {
         b.iter_batched(
             || cs.clone(),
             |cs| {
-                let s = cs.into_string();
+                let s = String::from(cs);
                 black_box(s);
             },
             BatchSize::SmallInput,

@@ -3,10 +3,13 @@
 
 mod impls;
 
-use std::{alloc::Layout, mem::MaybeUninit};
+use std::alloc::{handle_alloc_error, Layout};
+use std::mem::MaybeUninit;
 
 /// 栈上字符串的最大长度
 const STACK_LEN_MAX: usize = 15;
+
+const PTR_ALIGN: usize = 2;
 
 /// 定长字符串类型，长度较小时直接在栈上初始化，否则在堆上分配新内存
 ///
@@ -22,7 +25,7 @@ const STACK_LEN_MAX: usize = 15;
 /// use const_string::ConstString;
 /// let cs = ConstString::new("This is a longer string!");
 /// // 直接转换为String实例，无需重新堆分配
-/// let string = cs.into_string();
+/// let string = cs.to_string();
 /// assert_eq!(string, "This is a longer string!");
 /// assert_eq!(string.capacity(), string.len());
 /// ```
@@ -50,9 +53,6 @@ impl ConstString {
     pub fn as_mut_str(&mut self) -> &mut str {
         self.inner.as_mut_str()
     }
-    pub fn into_string(self) -> String {
-        self.inner.into_string()
-    }
 }
 
 /// 内部字符串结构，根据指针标记技术来区分栈/堆分配，对外隐藏了实现细节
@@ -65,13 +65,12 @@ impl HeapStackStr {
     fn new(val: &str) -> Self {
         if val.len() <= STACK_LEN_MAX {
             Self {
-                // SAFETY: 大小不超过STACK_LEN_MAX的字符串存储在栈上
-                stack: unsafe { StackStr::new(val.as_ptr(), val.len() as u8) },
+                stack: StackStr::new(val),
             }
         } else {
             Self {
                 // SAFETY: val自身保证了指针参数有效
-                heap: unsafe { HeapStr::new(val.as_ptr(), val.len()) },
+                heap: HeapStr::new(val),
             }
         }
     }
@@ -115,16 +114,6 @@ impl HeapStackStr {
             unsafe { self.heap.as_mut_str() }
         }
     }
-
-    fn into_string(self) -> String {
-        if self.is_stack() {
-            unsafe { self.stack }.into_string()
-        } else {
-            let heap = unsafe { self.heap };
-            std::mem::forget(self);
-            heap.into_string()
-        }
-    }
 }
 
 /// 由于`union`类型的`Copy`限制，[`HeapStr`]无法实现`Drop` trait。
@@ -137,7 +126,7 @@ impl Drop for HeapStackStr {
         unsafe {
             std::alloc::dealloc(
                 self.heap.ptr,
-                Layout::from_size_align_unchecked(self.heap.len(), 1),
+                Layout::from_size_align_unchecked(self.heap.len(), PTR_ALIGN),
             )
         };
     }
@@ -166,20 +155,22 @@ struct HeapStr {
 }
 
 impl StackStr {
-    unsafe fn new(ptr: *const u8, len: u8) -> Self {
+    fn new(val: &str) -> Self {
         let mut stack: StackStr = StackStr {
-            len: (len << 4) | 0x1, // tag stack
+            len: ((val.len() as u8) << 1) | 0x1, // tag stack
             str: MaybeUninit::uninit(),
         };
+        let src = val.as_ptr();
+        let dst = stack.str.as_mut_ptr() as *mut u8;
         unsafe {
             // SAFETY: len由调用方保证不会溢出
-            std::ptr::copy_nonoverlapping(ptr, stack.str.as_mut_ptr() as *mut u8, len as usize)
+            std::ptr::copy_nonoverlapping(src, dst, val.len())
         };
         stack
     }
 
     fn len(&self) -> usize {
-        (self.len >> 4) as usize
+        (self.len >> 1) as usize
     }
 
     fn as_str(&self) -> &str {
@@ -198,20 +189,23 @@ impl StackStr {
             ))
         }
     }
-
-    fn into_string(self) -> String {
-        String::from(self.as_str())
-    }
 }
 
 impl HeapStr {
-    unsafe fn new(ptr: *const u8, len: usize) -> Self {
+    fn new(val: &str) -> Self {
         let heap = HeapStr {
             // SAFETY: len由调用方保证大小
-            ptr: unsafe { std::alloc::alloc(Layout::from_size_align_unchecked(len, 1)) },
-            len: len,
+            ptr: unsafe {
+                let layout = Layout::from_size_align_unchecked(val.len(), PTR_ALIGN);
+                let ptr = std::alloc::alloc(layout);
+                if ptr.is_null() {
+                    handle_alloc_error(layout)
+                }
+                ptr
+            },
+            len: val.len(),
         };
-        unsafe { std::ptr::copy_nonoverlapping(ptr, heap.ptr, len) };
+        unsafe { std::ptr::copy_nonoverlapping(val.as_ptr(), heap.ptr, val.len()) };
         heap
     }
     fn len(&self) -> usize {
@@ -227,16 +221,10 @@ impl HeapStr {
             str::from_utf8_unchecked_mut(std::slice::from_raw_parts_mut(self.ptr, self.len()))
         }
     }
-
-    fn into_string(self) -> String {
-        // SAFETY: HeapStr已保证分配内存有效，可以直接复用
-        unsafe { String::from_raw_parts(self.ptr, self.len(), self.len()) }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
     #[test]
@@ -272,7 +260,7 @@ mod tests {
     fn test_any_len_into_string() {
         macro_rules! into_string {
             ($str: literal) => {
-                assert_eq!(ConstString::new($str).into_string(), $str);
+                assert_eq!(String::from(ConstString::new($str)), $str);
             };
         }
         into_string!("");
@@ -308,10 +296,6 @@ mod tests {
         println!("ptr: {:p}, len: {}", slice.as_ptr(), slice.len());
 
         println!("str: {}", cs.as_str());
-
-        let s = cs.into_string();
-
-        println!("Str: {}", s)
     }
 
     #[test]
@@ -325,9 +309,5 @@ mod tests {
         println!("ptr: {:p}, len: {}", slice.as_ptr(), slice.len());
 
         println!("str: {}", cs.as_str());
-
-        let s = cs.into_string();
-
-        println!("Str: {}", s)
     }
 }
